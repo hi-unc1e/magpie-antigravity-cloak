@@ -18,18 +18,22 @@
 //   以及 chat 协议下 messages 里 role === "system" 的消息）；
 //   deep 选项会混淆整个请求体（用户消息、tools、thinking 也一起）。
 //
-// 安装：magpie plugin add /Users/heguanghai/Code/magpie-antigravity-cloak
-//   （短名不识别，options 操作也要用完整路径）
+// 安装：magpie plugin add "$(pwd)"（在仓库根目录执行；短名不识别，
+//   options 等操作也要用完整路径）
 //
 // 可选配置（magpie plugin options <完整路径> '<json>'）：
 //   { "extraWords": ["自定义敏感词"], "off": true, "deep": true }
 //   off 设为 true 时完全放行；deep 设为 true 时深度混淆整个请求体，
 //   覆盖面更大但更激进。
+//
+// 性能：词表正则按词表内容编译一次并缓存（跨请求复用），
+//   每条文本先用单个预筛正则判一次"是否含任一敏感词"，
+//   未命中就直接返回，避免对大体积请求体做 N 遍全量扫描。
 
-// 零宽空格写成转义形式，避免源码里出现肉眼不可见的字符（词表请保持纯 ASCII）
-const ZERO_WIDTH = "​"
+// 零宽空格：用转义写法，源码里不留肉眼不可见的字符（词表请保持纯 ASCII）
+const ZERO_WIDTH = "\u200B"
 
-// 默认敏感词，全部纯 ASCII。不要把零宽字符写进词表，会被 buildNeedles 过滤掉。
+// 默认敏感词，全部纯 ASCII。不要把零宽字符写进词表，会被 normalizeWords 过滤掉。
 // 大小写不敏感。
 const DEFAULT_WORDS = [
   "x-anthropic-billing-header",
@@ -43,14 +47,21 @@ const DEFAULT_WORDS = [
   "RFC 2119",
 ]
 
-function buildNeedles(extra) {
+// 递归时不碰的字段：签名类、标识类字段被改写会导致上游校验失败
+const SKIP_KEYS = new Set(["signature", "id", "session", "sessionId", "requestId"])
+
+// 词表 → 编译结果（预筛正则 + 逐词替换正则）的缓存，key 为词表规范化后的拼接
+const COMPILED = new Map()
+const MAX_CACHE = 32
+
+// 去重、去掉已含零宽空格的（用户误贴混淆文本）、按长度从长到短排序，
+// 避免短词先匹配破坏长词
+function normalizeWords(extra) {
   const words = DEFAULT_WORDS.concat(Array.isArray(extra) ? extra : [])
-  // 去掉已含零宽空格的（用户误贴混淆文本），去重，按长度从长到短，
-  // 避免短词先匹配破坏长词
   const seen = new Set()
   const out = []
   for (const w of words) {
-    if (!w || typeof w !== "string" || w.length < 2 || w.includes(ZERO_WIDTH)) continue
+    if (typeof w !== "string" || w.length < 2 || w.includes(ZERO_WIDTH)) continue
     const k = w.toLowerCase()
     if (seen.has(k)) continue
     seen.add(k)
@@ -65,37 +76,60 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
+// 同一套词表只编译一次：预筛正则（无 g，可安全复用 test）+
+// 逐词替换正则（带 g，String.replace 每次调用都会重置 lastIndex，可安全复用）
+function compileCloak(extra) {
+  const words = normalizeWords(extra)
+  const key = words.join("\u0000")
+  const hit = COMPILED.get(key)
+  if (hit) return hit
+
+  const cloak = {
+    gate: words.length ? new RegExp(words.map(escapeRegExp).join("|"), "i") : null,
+    passes: words.map((w) => new RegExp(escapeRegExp(w), "gi")),
+  }
+  if (COMPILED.size >= MAX_CACHE) COMPILED.clear()
+  COMPILED.set(key, cloak)
+  return cloak
+}
+
+// 在命中词的第一个字符后插零宽空格
+function cloakMatch(m) {
+  return m[0] + ZERO_WIDTH + m.slice(1)
+}
+
 // 在 text 的每个敏感词第一个字符后插零宽空格。
 // 每个词用正则整体替换一遍：已混淆的词中间多了零宽空格，
 // 不再匹配，天然幂等。
-function cloakText(text, needles) {
+function cloakText(text, cloak) {
   if (typeof text !== "string" || text.length < 2) return text
-  for (const needle of needles) {
-    const re = new RegExp(escapeRegExp(needle), "gi")
-    text = text.replace(re, (m) => m[0] + ZERO_WIDTH + m.slice(1))
-  }
-  return text
+  // 预筛：一条文本都不含敏感词时，省掉 N 遍 replace
+  if (!cloak.gate || !cloak.gate.test(text)) return text
+  let out = text
+  for (const re of cloak.passes) out = out.replace(re, cloakMatch)
+  return out
 }
 
 // 递归遍历 JSON 值：对每个字符串混淆，并原地写回。
 // 疑似 base64 / data URL 的超长无空格串不碰；签名等字段不碰。
-const SKIP_KEYS = new Set(["signature", "id", "session", "sessionId", "requestId"])
-
-function cloakDeep(value, needles) {
+function cloakDeep(value, cloak) {
   if (value == null) return value
   const t = typeof value
   if (t === "string") {
     if (value.length > 4096 && !value.includes(" ")) return value
-    return cloakText(value, needles)
+    return cloakText(value, cloak)
   }
   if (t !== "object") return value
   if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) value[i] = cloakDeep(value[i], needles)
+    for (let i = 0; i < value.length; i++) value[i] = cloakDeep(value[i], cloak)
     return value
   }
-  for (const k in value) {
+  // 只遍历自有可枚举属性，不碰原型链
+  const keys = Object.keys(value)
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]
     if (SKIP_KEYS.has(k)) continue
-    value[k] = cloakDeep(value[k], needles)
+    value[k] = cloakDeep(value[k], cloak)
   }
   return value
 }
@@ -106,29 +140,33 @@ function isChatSystem(msg) {
 }
 
 // 混淆一个可能是字符串或嵌套对象的系统提示词字段
-function cloakSystemField(sys, needles) {
-  if (typeof sys === "string") return cloakText(sys, needles)
-  if (sys && typeof sys === "object") cloakDeep(sys, needles)
+function cloakSystemField(sys, cloak) {
+  if (typeof sys === "string") return cloakText(sys, cloak)
+  if (sys && typeof sys === "object") cloakDeep(sys, cloak)
   return sys
 }
+
+const SYSTEM_KEYS = ["system", "systemInstruction", "instructions"]
 
 export function onRequest(body, ctx) {
   const opts = ctx.options ?? {}
   if (opts.off) return body
 
-  const needles = buildNeedles(opts.extraWords)
+  const cloak = compileCloak(opts.extraWords)
 
   // deep：全字段深度混淆，用户消息、tools、thinking 也一起
-  if (opts.deep) return cloakDeep(body, needles)
+  if (opts.deep) return cloakDeep(body, cloak)
 
   // 默认：只混淆系统提示词（cli-proxy-api 的保守行为，模型输出质量影响最小）
-  for (const key of ["system", "systemInstruction", "instructions"]) {
-    if (body[key] != null) body[key] = cloakSystemField(body[key], needles)
+  for (let i = 0; i < SYSTEM_KEYS.length; i++) {
+    const key = SYSTEM_KEYS[i]
+    if (body[key] != null) body[key] = cloakSystemField(body[key], cloak)
   }
   if (Array.isArray(body.messages)) {
-    for (const msg of body.messages) {
+    for (let i = 0; i < body.messages.length; i++) {
+      const msg = body.messages[i]
       if (!isChatSystem(msg)) continue
-      msg.content = cloakSystemField(msg.content, needles)
+      msg.content = cloakSystemField(msg.content, cloak)
     }
   }
   return body

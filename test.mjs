@@ -5,7 +5,7 @@
 // 每个混淆断言都成对检查"混淆前不含 ZW、混淆后含 ZW"。
 import { onRequest } from "./antigravity-cloak.middleware.js"
 
-const ZW = "​"
+const ZW = "\u200B"
 // 纯净词构造：把源码里的词拆开拼接，保证测试文件里永远没有完整触发词
 const W = {
   billing: "x-an" + "thropic-billing-header",
@@ -192,6 +192,35 @@ const untouched = (after, w) =>
   // "aa" 出现 2 次（重叠的第三个不计），每处首字符后插 ZW
   const count = (out.system.match(new RegExp(ZW, "g")) || []).length
   assert(count === 2, `重叠匹配不漏（插了 ${count} 处，应为 2）`)
+}
+
+// 13. 词表缓存：不同 extraWords 交替调用互不污染
+{
+  const sys = "alpha-marker and beta-marker"
+  const optsA = { protocol: "anthropic", options: { extraWords: ["alpha-marker"] } }
+  const optsB = { protocol: "anthropic", options: { extraWords: ["beta-marker"] } }
+  const a = onRequest({ system: sys, messages: [] }, optsA)
+  const b = onRequest({ system: sys, messages: [] }, optsB)
+  const a2 = onRequest({ system: sys, messages: [] }, optsA)
+  cloaked(sys, a.system, "alpha-marker")
+  untouched(a.system, "beta-marker")
+  cloaked(sys, b.system, "beta-marker")
+  untouched(b.system, "alpha-marker")
+  assert(a2.system === a.system, "词表缓存：同一词表重复调用结果一致")
+}
+
+// 14. 预筛不误伤：不含任何敏感词的请求体原样返回
+{
+  const big = "lorem ipsum dolor sit amet ".repeat(2000)
+  const body = {
+    model: "m",
+    system: big,
+    messages: [{ role: "user", content: big }],
+    tools: [{ name: "t", description: big }],
+  }
+  const before = JSON.stringify(body)
+  const out = onRequest(body, { protocol: "anthropic", options: { deep: true } })
+  assert(JSON.stringify(out) === before, "预筛：无敏感词时请求体原样返回")
 }
 
 console.log(process.exitCode ? "有失败" : "全部通过")
