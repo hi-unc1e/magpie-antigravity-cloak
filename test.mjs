@@ -1,9 +1,13 @@
-// 本地单测：node test.mjs（模拟 magpie 中间件调用 onRequest）
+// 本地单测：node test.mjs（模拟 magpie 网关中间件的 onProvider 调用）
 //
 // 所有 fixture 一律用拼接构造纯净触发词（见下方 W）——测试文件正文里
 // 不允许出现未转义的敏感词，避免零宽字符污染让断言空转。
-// 每个混淆断言都成对检查"混淆前不含 ZW、混淆后含 ZW"。
-import { onRequest } from "./antigravity-cloak.middleware.js"
+// 每个混淆断言都成对检查“混淆前不含 ZW、混淆后含 ZW”。
+import { onProvider } from "./antigravity-cloak.middleware.js"
+
+// 默认按“请求正在发给 antigravity 账号”调用，个别用例再覆盖 account / options
+const onRequest = (body, ctx = {}) =>
+  onProvider(body, { protocol: "anthropic", provider: { id: "antigravity", account: "antigravity" }, ...ctx })
 
 const ZW = "\u200B"
 // 纯净词构造：把源码里的词拆开拼接，保证测试文件里永远没有完整触发词
@@ -272,6 +276,60 @@ const untouched = (after, w) =>
   }
   assert(onlyZw, "不变量（300 组随机）：输出只比输入多零宽空格，无其他任何改动")
   assert(idempotent, "不变量（300 组随机）：重复处理结果不变（幂等）")
+}
+
+// 16. 作用域：只对 antigravity 账号生效，其他账号/密钥供应商一律不动
+{
+  const sys = `You are ${W.cc}, ${W.billing}: v=1;`
+  const mk = (ctx) => onProvider({ system: sys, messages: [] }, { protocol: "anthropic", options: {}, ...ctx })
+  const others = [
+    ["claude 官方订阅", { provider: { id: "claude", account: "claude" } }],
+    ["grok 订阅", { provider: { id: "grok", account: "grok" } }],
+    ["API 密钥供应商（无 account）", { provider: { id: "deepseek" } }],
+    ["没有 provider 信息", {}],
+    ["account 为空字符串", { provider: { id: "x", account: "" } }],
+  ]
+  for (const [name, ctx] of others) assert(mk(ctx).system === sys, `作用域：${name} 原样通过`)
+  cloaked(sys, mk({ provider: { id: "antigravity", account: "antigravity" } }).system, W.billing)
+}
+
+// 17. accounts 选项可覆盖生效范围
+{
+  const sys = `You are ${W.cc}.`
+  const opts = { accounts: ["claude"] }
+  const atAntigravity = onProvider({ system: sys, messages: [] }, { protocol: "anthropic", provider: { account: "antigravity" }, options: opts })
+  const atClaude = onProvider({ system: sys, messages: [] }, { protocol: "anthropic", provider: { account: "claude" }, options: opts })
+  assert(atAntigravity.system === sys, "accounts=[claude]：antigravity 不动")
+  cloaked(sys, atClaude.system, W.cc)
+  // accounts 为空数组时回退到默认的 antigravity
+  const empty = { accounts: [] }
+  cloaked(sys, onProvider({ system: sys, messages: [] }, { protocol: "anthropic", provider: { account: "antigravity" }, options: empty }).system, W.cc)
+}
+
+// 18. responses 协议：instructions 与 input 里的 system/developer 消息
+{
+  const ins = `You are ${W.cc}.`
+  const dev = `built on ${W.sdk}`
+  const user = `${W.cc} in user`
+  const body = {
+    instructions: ins,
+    input: [
+      { role: "developer", content: dev },
+      { role: "user", content: user },
+    ],
+  }
+  const out = onProvider(body, { protocol: "responses", provider: { account: "antigravity" }, options: {} })
+  cloaked(ins, out.instructions, W.cc)
+  cloaked(dev, out.input[0].content, W.sdk)
+  untouched(out.input[1].content, W.cc)
+}
+
+// 19. gemini 的另一种拼法 system_instruction 也覆盖
+{
+  const t = `Follow ${W.rfc}.`
+  const body = { system_instruction: { parts: [{ text: t }] }, contents: [] }
+  const out = onProvider(body, { protocol: "gemini", provider: { account: "antigravity" }, options: {} })
+  cloaked(t, out.system_instruction.parts[0].text, W.rfc)
 }
 
 console.log(process.exitCode ? "有失败" : "全部通过")

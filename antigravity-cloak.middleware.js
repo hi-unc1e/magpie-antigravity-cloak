@@ -14,16 +14,21 @@
 // 做法（参考 cli-proxy-api PR #6280）：
 //   在敏感词第一个字符后插入零宽空格。人眼看不出差别，
 //   模型也基本不受影响，但上游的关键字匹配就失效了。
-//   默认只混淆系统提示词（system / systemInstruction / instructions，
-//   以及 chat 协议下 messages 里 role === "system" 的消息）；
+//   只改发给 Antigravity 的请求：入口是 onProvider(body, ctx)，
+//   按 ctx.provider.account 判断账号种类（默认 accounts: ["antigravity"]）；
+//   其他供应商、Claude 官方订阅之类拿到的提示词保持原样。
+//   默认只混淆系统提示词（system / systemInstruction / system_instruction /
+//   instructions，chat 协议下 messages 里 role 为 system/developer 的消息，
+//   以及 Responses 协议下 input 里的 system/developer 消息）；
 //   deep 选项会混淆整个请求体（用户消息、tools、thinking 也一起）。
 //
 // 安装：magpie plugin add "$(pwd)"（在仓库根目录执行；短名不识别，
 //   options 等操作也要用完整路径）
 //
 // 可选配置（magpie plugin options <完整路径> '<json>'）：
-//   { "extraWords": ["自定义敏感词"], "off": true, "deep": true }
-//   off 设为 true 时完全放行；deep 设为 true 时深度混淆整个请求体，
+//   { "extraWords": ["自定义敏感词"], "accounts": ["antigravity"], "off": true, "deep": true }
+//   off 设为 true 时完全放行；accounts 是生效的账号种类（ctx.provider.account），
+//   留空或不存在时默认只对 antigravity 生效；deep 设为 true 时深度混淆整个请求体，
 //   覆盖面更大但更激进。
 //
 // 性能：词表正则按词表内容编译一次并缓存（跨请求复用），
@@ -134,9 +139,10 @@ function cloakDeep(value, cloak) {
   return value
 }
 
-// 判断 chat 协议下 messages 里的 system 消息
-function isChatSystem(msg) {
-  return msg && typeof msg === "object" && !Array.isArray(msg) && msg.role === "system"
+// 判断 chat / responses 协议下带系统提示词的消息
+function isSystemMessage(msg) {
+  if (!msg || typeof msg !== "object" || Array.isArray(msg)) return false
+  return msg.role === "system" || msg.role === "developer"
 }
 
 // 混淆一个可能是字符串或嵌套对象的系统提示词字段
@@ -146,11 +152,25 @@ function cloakSystemField(sys, cloak) {
   return sys
 }
 
-const SYSTEM_KEYS = ["system", "systemInstruction", "instructions"]
+// 系统提示词可能出现的字段：anthropic 的 system、gemini 的 systemInstruction
+// （两种拼法）、responses 的 instructions
+const SYSTEM_KEYS = ["system", "systemInstruction", "system_instruction", "instructions"]
+// 系统消息可能出现的数组：chat 的 messages、responses 的 input
+const MESSAGE_KEYS = ["messages", "input"]
 
-export function onRequest(body, ctx) {
+const DEFAULT_ACCOUNTS = ["antigravity"]
+
+// 只对指定的账号种类生效；API 密钥供应商没有 account，一律不动
+function accountMatches(ctx, opts) {
+  const list = Array.isArray(opts.accounts) && opts.accounts.length ? opts.accounts : DEFAULT_ACCOUNTS
+  const account = ctx.provider?.account
+  return typeof account === "string" && list.includes(account)
+}
+
+export function onProvider(body, ctx) {
   const opts = ctx.options ?? {}
   if (opts.off) return body
+  if (!accountMatches(ctx, opts)) return body
 
   const cloak = compileCloak(opts.extraWords)
 
@@ -162,10 +182,12 @@ export function onRequest(body, ctx) {
     const key = SYSTEM_KEYS[i]
     if (body[key] != null) body[key] = cloakSystemField(body[key], cloak)
   }
-  if (Array.isArray(body.messages)) {
-    for (let i = 0; i < body.messages.length; i++) {
-      const msg = body.messages[i]
-      if (!isChatSystem(msg)) continue
+  for (let k = 0; k < MESSAGE_KEYS.length; k++) {
+    const list = body[MESSAGE_KEYS[k]]
+    if (!Array.isArray(list)) continue
+    for (let i = 0; i < list.length; i++) {
+      const msg = list[i]
+      if (!isSystemMessage(msg)) continue
       msg.content = cloakSystemField(msg.content, cloak)
     }
   }

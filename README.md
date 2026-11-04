@@ -41,7 +41,8 @@ Antigravity 上游**按请求文本里的特定指纹字符串拦截**，并统�
 上游的关键字匹配失效，请求正常通过；人眼看不出差别，模型效果基本不受影响。此思路来自 [cli-proxy-api PR #6280](https://github.com/router-for-me/CLIProxyAPI/pull/6280)，本插件在其基础上：
 
 - 覆盖实测新发现的计费头触发词
-- 默认覆盖所有系统提示词位置（`system` / `systemInstruction` / `instructions`，以及 chat 协议下 `messages` 里 `role === "system"` 的消息）
+- **只改发给 Antigravity 的请求**：使用 `onProvider(body, ctx)` 按 `ctx.provider.account` 匹配（默认 `accounts: ["antigravity"]`），Claude 官方订阅、Grok、DeepSeek 等其他供应商拿到的提示词保持原样
+- 默认覆盖所有系统提示词位置（`system` / `systemInstruction` / `system_instruction` / `instructions`，以及 chat 的 `messages`、Responses 的 `input` 里 `role` 为 `system` 或 `developer` 的消息）
 - 可选 `deep` 模式，把用户消息、工具描述、thinking 块也一起混淆
 
 ## 安装
@@ -72,12 +73,13 @@ magpie plugin add "$(pwd)"
 ## 配置（可选）
 
 ```sh
-magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "off": false, "deep": false}'
+magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "accounts": ["antigravity"], "off": false, "deep": false}'
 ```
 
 | 选项 | 默认 | 说明 |
 |---|---|---|
 | `extraWords` | `[]` | 追加自定义敏感词（纯文本，大小写不敏感） |
+| `accounts` | `["antigravity"]` | 生效的账号种类（匹配 `ctx.provider.account`）；其他供应商原样通过 |
 | `off` | `false` | 设为 `true` 时完全放行，不混淆 |
 | `deep` | `false` | 设为 `true` 时深度混淆整个请求体（用户消息、tools、thinking 也一起），覆盖面更大但更激进，可能影响模型效果 |
 
@@ -91,7 +93,7 @@ magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "off": false, "
 npm test
 ```
 
-跑 51 条断言（各协议 system 形态、深度模式、幂等、还原等价、base64 跳过、正则特殊字符、重叠匹配、词表缓存隔离，以及 300 组随机不变量：输出除插入的零宽空格之外无任何其他改动）。
+跑 70 条断言（作用域仅限 `antigravity`、各协议 system 形态、深度模式、幂等、还原等价、base64 跳过、正则特殊字符、重叠匹配、词表缓存隔离，以及 300 组随机不变量）。
 
 端到端验证（用真实 Claude Code 打 magpie，因为手工 curl 复现不出计费头触发词）：
 
@@ -109,9 +111,10 @@ Claude Desktop / Claude Code
         │ 真实请求（system 带计费头与身份字样）
         ▼
 magpie 网关 (localhost:3425)
-        │ onRequest(body, ctx) ← 本中间件：敏感词第一字符后插 U+200B
+        │ onProvider(body, ctx) ← 只在 ctx.provider.account 为 antigravity 时生效
         ▼
-Antigravity 上游（指纹匹配失效，放行）
+Antigravity 上游（敏感词首字符后多了 U+200B，指纹匹配失效，放行）
+其他供应商      （完全不动，原样收到请求）
 ```
 
 实现要点：
@@ -126,7 +129,7 @@ Antigravity 上游（指纹匹配失效，放行）
 
 ```
 magpie-antigravity-cloak/
-├── antigravity-cloak.middleware.js   # 中间件主体（onRequest 入口）
+├── antigravity-cloak.middleware.js   # 中间件主体（onProvider 入口）
 ├── test.mjs                          # 本地单测
 ├── package.json                      # magpie 插件清单
 ├── LICENSE

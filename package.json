@@ -12,6 +12,7 @@
     "middleware": "./antigravity-cloak.middleware.js",
     "options": {
       "extraWords": [],
+      "accounts": ["antigravity"],
       "off": false,
       "deep": false
     }
