@@ -1,6 +1,6 @@
 // 本地单测：node test.mjs（模拟 magpie 中间件调用 onRequest）
 //
-// 所有 fixture 一律用 wr() 拼接构造纯净触发词——测试文件正文里
+// 所有 fixture 一律用拼接构造纯净触发词（见下方 W）——测试文件正文里
 // 不允许出现未转义的敏感词，避免零宽字符污染让断言空转。
 // 每个混淆断言都成对检查"混淆前不含 ZW、混淆后含 ZW"。
 import { onRequest } from "./antigravity-cloak.middleware.js"
@@ -221,6 +221,57 @@ const untouched = (after, w) =>
   const before = JSON.stringify(body)
   const out = onRequest(body, { protocol: "anthropic", options: { deep: true } })
   assert(JSON.stringify(out) === before, "预筛：无敏感词时请求体原样返回")
+}
+
+// 15. 不变量（300 组随机，固定种子可复现）：只插入零宽空格、不引入其他改动、幂等
+{
+  let seed = 20241104
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff
+  const pick = (a) => a[Math.floor(rnd() * a.length)]
+  const needles = [W.billing, W.cc, W.sdk, W.cli, W.conv, W.rfc]
+  const mixCase = (s) => s.split("").map((c) => (rnd() < 0.4 ? c.toUpperCase() : c)).join("")
+  const filler = ["hello", "the quick brown fox", "你好，世界", "\n", " ", "(a|b) [c]", "$1 $&", "🎉", "", "claude codex", "  \t "]
+  const text = (d = 0) => {
+    const r = rnd()
+    if (r < 0.35) return pick(["", "pre "]) + mixCase(pick(needles)) + pick(["", " post", "; cc_version=1;"])
+    if (r < 0.42) return "Q0xhdWRl" + "A".repeat(4100 + Math.floor(rnd() * 100))
+    if (r < 0.5 && d < 3) return text(d + 1) + pick([" ", ""]) + text(d + 1)
+    let s = ""
+    for (let i = 0; i < 4; i++) s += pick(filler)
+    return s
+  }
+  const value = (d = 0) => {
+    const r = rnd()
+    if (r < 0.5 || d >= 3) return text(d)
+    if (r < 0.58) return pick([null, 0, 1.5, true, false])
+    if (r < 0.78) return Array.from({ length: Math.floor(rnd() * 4) }, () => value(d + 1))
+    const o = {}
+    for (let i = 0; i < 4; i++) o[pick(["text", "content", "system", "signature", "id", "parts", "x"])] = value(d + 1)
+    return o
+  }
+  // 序列化前去掉 ZW，用于判断“除了插入 ZW 以外是否还有别的改动”
+  const strip = (v) =>
+    JSON.stringify(v, (k, val) =>
+      val === undefined ? "\u0000undefined" : typeof val === "string" ? val.replaceAll(ZW, "") : val,
+    )
+  let onlyZw = true
+  let idempotent = true
+  for (let i = 0; i < 300; i++) {
+    let body =
+      rnd() < 0.5
+        ? { system: text(), messages: [{ role: "system", content: text() }, { role: "user", content: text() }] }
+        : value()
+    // 中间的 magpie 只会传 JSON.parse 出来的对象；null 根不在契约内
+    if (body == null) body = { system: text(), messages: [] }
+    const opts = { deep: rnd() < 0.5, extraWords: rnd() < 0.3 ? ["my-marker", "aa", "(a|b) [c]"] : [] }
+    const before = strip(body)
+    const once = onRequest(structuredClone(body), { protocol: "anthropic", options: opts })
+    if (strip(once) !== before) onlyZw = false
+    const twice = onRequest(structuredClone(once), { protocol: "anthropic", options: opts })
+    if (strip(twice) !== strip(once)) idempotent = false
+  }
+  assert(onlyZw, "不变量（300 组随机）：输出只比输入多零宽空格，无其他任何改动")
+  assert(idempotent, "不变量（300 组随机）：重复处理结果不变（幂等）")
 }
 
 console.log(process.exitCode ? "有失败" : "全部通过")
