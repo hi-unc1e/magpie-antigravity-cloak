@@ -30,12 +30,12 @@ Antigravity 上游**按请求文本里的特定指纹字符串拦截**，并统�
 
 ## 解决方案
 
-在敏感词第一个字符后插入零宽空格（U+200B）：
+在命中词里每段连续 3 个以上的字母或数字的第 1、第 2 个字符后各插入一个零宽空格（U+200B）。只在首字符后插一个的旧做法，2026-11-11 起已再次被 Antigravity 拦成 429。
 
 ```
-输入: x-anthropic-billing-header: cc_version=2.1.295;
-输出: x-anthropic-billing-header: cc_version=2.1.295;
-      ^ "x" 之后有一个肉眼不可见的零宽空格
+输入: x-anthropic-billing-header
+打断: x-a·n·thropic-b·i·lling-h·e·ader
+      · 表示一个肉眼不可见的 U+200B（不在单独的 "x" 后面）
 ```
 
 上游的关键字匹配失效，请求正常通过；人眼看不出差别，模型效果基本不受影响。此思路来自 [cli-proxy-api PR #6280](https://github.com/router-for-me/CLIProxyAPI/pull/6280)，本插件在其基础上：
@@ -83,7 +83,7 @@ magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "accounts": ["a
 | `off` | `false` | 设为 `true` 时完全放行，不混淆 |
 | `deep` | `false` | 设为 `true` 时深度混淆整个请求体（用户消息、tools、thinking 也一起），覆盖面更大但更激进，可能影响模型效果 |
 
-默认词表：`x-anthropic-billing-header`、`Claude Agent SDK`、`Claude Code`、`Anthropic's official CLI`、`system-conventions`、`system_conventions`、`system-directive`、`system_directive`、`RFC 2119`。
+默认词表：`x-anthropic-billing-header`、`Claude Agent SDK`、`Claude Code`、`Anthropic's official CLI`、`system-conventions`、`system_conventions`、`system-directive`、`system_directive`、`RFC 2119`，以及社区版 0.1.1–0.1.4 补上的 `You are Codex, an agent based on GPT-5`、`You are Codex, a coding agent based on GPT-5`、`Hermes Agent, an intelligent AI assistant created by Nous Research`、`RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`。
 
 插件文件每秒热加载，改完 `antigravity-cloak.middleware.js` 立即生效，无需重启 magpie。
 
@@ -93,7 +93,7 @@ magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "accounts": ["a
 npm test
 ```
 
-跑 70 条断言（作用域仅限 `antigravity`、各协议 system 形态、深度模式、幂等、还原等价、base64 跳过、正则特殊字符、重叠匹配、词表缓存隔离，以及 300 组随机不变量）。
+跑 82 条断言（作用域仅限 `antigravity`、各协议 system 形态、双零宽打断、Codex/Hermes/omp 新触发词、深度模式、幂等、还原等价、base64 跳过、正则特殊字符、重叠匹配、词表缓存隔离，以及 300 组随机不变量）。
 
 端到端验证（用真实 Claude Code 打 magpie，因为手工 curl 复现不出计费头触发词）：
 
@@ -113,7 +113,7 @@ Claude Desktop / Claude Code
 magpie 网关 (localhost:3425)
         │ onProvider(body, ctx) ← 只在 ctx.provider.account 为 antigravity 时生效
         ▼
-Antigravity 上游（敏感词首字符后多了 U+200B，指纹匹配失效，放行）
+Antigravity 上游（敏感词里每段字母数字的第 1、第 2 字符后各有一个 U+200B，指纹匹配失效，放行）
 其他供应商      （完全不动，原样收到请求）
 ```
 

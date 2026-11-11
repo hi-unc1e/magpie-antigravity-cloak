@@ -11,9 +11,12 @@
 //   2. 身份字样："Claude Code" / "Claude Agent SDK" 等
 //      （issue #666 确认，cli-proxy-api PR #6280 的默认指纹）。
 //
-// 做法（参考 cli-proxy-api PR #6280）：
-//   在敏感词第一个字符后插入零宽空格。人眼看不出差别，
-//   模型也基本不受影响，但上游的关键字匹配就失效了。
+// 做法（参考 cli-proxy-api PR #6280，2026-11-11 起与社区版 0.1.3 同步）：
+//   命中词里每段连续 3 个以上的字母或数字，在第 1、第 2 个字符后
+//   各插一个零宽空格。只在首字符后插一个，2026-11-11 起已再次被
+//   Antigravity 拦下（实测：x\u200b-anthropic-billing-header、C\u200blaude Agent SDK）。
+//   没有这种长串的短词（如两字自定义词）仍在整段首字符后插一个。
+//   人眼看不出差别，模型也基本不受影响，但上游的关键字匹配失效。
 //   只改发给 Antigravity 的请求：入口是 onProvider(body, ctx)，
 //   按 ctx.provider.account 判断账号种类（默认 accounts: ["antigravity"]）；
 //   其他供应商、Claude 官方订阅之类拿到的提示词保持原样。
@@ -50,6 +53,11 @@ const DEFAULT_WORDS = [
   "system-directive",
   "system_directive",
   "RFC 2119",
+  // 社区版 0.1.1–0.1.4 补上的触发词（Codex / Hermes / omp 首行）
+  "You are Codex, an agent based on GPT-5",
+  "You are Codex, a coding agent based on GPT-5",
+  "Hermes Agent, an intelligent AI assistant created by Nous Research",
+  "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
 ]
 
 // 递归时不碰的字段：签名类、标识类字段被改写会导致上游校验失败
@@ -98,12 +106,22 @@ function compileCloak(extra) {
   return cloak
 }
 
-// 在命中词的第一个字符后插零宽空格
+// 打断一段连续字母数字：第 1、第 2 个字符后各一个零宽空格。
+// 与社区版 cloaker 一致：/ [A-Za-z0-9]{3,} /
+function breakRun(run) {
+  return run[0] + ZERO_WIDTH + run[1] + ZERO_WIDTH + run.slice(2)
+}
+
+// 命中整段后：段内每个 3 字以上的字母数字串都打断。
+// 一段都没有（两字自定义词等）则退回到整段首字符后插一个。
+// 已打断的串不再是连续字母数字，外层词也因为中间多了零宽空格而不再匹配，幂等。
 function cloakMatch(m) {
+  const broken = m.replace(/[A-Za-z0-9]{3,}/g, breakRun)
+  if (broken !== m) return broken
   return m[0] + ZERO_WIDTH + m.slice(1)
 }
 
-// 在 text 的每个敏感词第一个字符后插零宽空格。
+// 在 text 的每个敏感词上做 cloakMatch。
 // 每个词用正则整体替换一遍：已混淆的词中间多了零宽空格，
 // 不再匹配，天然幂等。
 function cloakText(text, cloak) {

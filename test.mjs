@@ -2,7 +2,7 @@
 //
 // 所有 fixture 一律用拼接构造纯净触发词（见下方 W）——测试文件正文里
 // 不允许出现未转义的敏感词，避免零宽字符污染让断言空转。
-// 每个混淆断言都成对检查“混淆前不含 ZW、混淆后含 ZW”。
+// 每个混淆断言都成对检查“混淆前不含 ZW、混淆后与 breakWord 一致”。
 import { onProvider } from "./antigravity-cloak.middleware.js"
 
 // 默认按“请求正在发给 antigravity 账号”调用，个别用例再覆盖 account / options
@@ -18,19 +18,29 @@ const W = {
   cli: "A" + "nthropic's official CLI",
   conv: "s" + "ystem-conventions",
   rfc: "R" + "FC 2119",
+  codex: "You are Co" + "dex, an agent based on GP" + "T-5",
+  codex2: "You are Co" + "dex, a coding agent based on GP" + "T-5",
+  hermes: "Her" + "mes Agent, an intelligent AI assistant created by Nous Research",
+  rfcLine: "R" + "FC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
+}
+
+// 与中间件 cloakMatch 同一规则，用来写期望值
+function breakWord(w) {
+  const broken = w.replace(/[A-Za-z0-9]{3,}/g, (run) => run[0] + ZW + run[1] + ZW + run.slice(2))
+  return broken !== w ? broken : w[0] + ZW + w.slice(1)
 }
 
 const assert = (cond, name) => {
   if (cond) console.log("✔ " + name)
   else { console.error("✘ " + name); process.exitCode = 1 }
 }
-// 混淆断言：混淆前的文本必须不含 ZW（fixture 纯净），混淆后必须在词首字符后插入 ZW
+// 混淆断言：混淆前不含 ZW；混淆后必须含 breakWord(w)（3 字以上字母数字串各插两处）
 const cloaked = (before, after, w) => {
   assert(!before.includes(ZW), `fixture 纯净：${JSON.stringify(w)} 输入不含零宽`)
-  assert(after.includes(w[0] + ZW + w.slice(1)), `被混淆：${JSON.stringify(w)}`)
+  assert(after.includes(breakWord(w)), `被混淆：${JSON.stringify(w)}`)
 }
 const untouched = (after, w) =>
-  assert(!after.includes(w[0] + ZW + w.slice(1)), `未被动过：${JSON.stringify(w)}`)
+  assert(!after.includes(breakWord(w)), `未被动过：${JSON.stringify(w)}`)
 
 // 1. anthropic：system 为字符串
 {
@@ -330,6 +340,26 @@ const untouched = (after, w) =>
   const body = { system_instruction: { parts: [{ text: t }] }, contents: [] }
   const out = onProvider(body, { protocol: "gemini", provider: { account: "antigravity" }, options: {} })
   cloaked(t, out.system_instruction.parts[0].text, W.rfc)
+}
+
+// 20. 2026-11-11 起：计费头不再只在首字符后插一个（那种形态已再次被拦）
+{
+  const t = W.billing + ": cc_version=2.1.0;"
+  const out = onRequest({ system: t, messages: [] }, { protocol: "anthropic", options: {} })
+  const oldShape = "x" + ZW + "-anthropic-billing-header"
+  assert(!out.system.includes(oldShape), "计费头：不是只打断首字符的旧形态")
+  cloaked(t, out.system, W.billing)
+  assert(out.system.startsWith("x-a" + ZW + "n" + ZW + "thropic-"), "计费头：anthropic 段第 1、第 2 字符后各一个零宽")
+}
+
+// 21. 社区版 0.1.4 新触发词：Codex、Hermes、omp 的 RFC 2119 整句
+{
+  const sys = [W.codex, W.codex2, W.hermes, W.rfcLine].join("\n")
+  const out = onRequest({ system: sys, messages: [] }, { protocol: "anthropic", options: {} })
+  cloaked(sys, out.system, W.codex)
+  cloaked(sys, out.system, W.codex2)
+  cloaked(sys, out.system, W.hermes)
+  cloaked(sys, out.system, W.rfcLine)
 }
 
 console.log(process.exitCode ? "有失败" : "全部通过")
