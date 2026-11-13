@@ -25,7 +25,7 @@ const diffs = []
 for (const c of cases) {
   const want = c.expect_request ?? c.request
   const ctx = { protocol: c.protocol, provider: c.provider, options: c.options ?? {} }
-  const got = onProvider(structuredClone(c.request), ctx)
+  const got = onProvider(structuredClone(c.request), ctx) ?? c.request
   const same = JSON.stringify(got) === JSON.stringify(want)
   const strip = (v) => JSON.stringify(v).replaceAll(ZW, "")
   if (same) pass++

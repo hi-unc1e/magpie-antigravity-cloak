@@ -14,12 +14,13 @@
 
 ## 硬性规则
 
-1. **不改行为就不动测试；改行为必须先跑 `npm test`（当前 82 条断言）再提交。**
+1. **不改行为就不动测试；改行为必须先跑 `npm test`（当前 89 条断言）再提交。**
 2. 词表 `DEFAULT_WORDS` 保持纯 ASCII，源码任何位置不得出现字面 U+200B，一律写 `"\u200B"`。
 3. `test.mjs` 正文里不允许出现完整敏感词，fixture 一律用 `W` 里的拆分拼接构造。
 4. 不变量（已固化成随机 300 组测试，违反即测试失败）：
    - 输出去掉零宽空格后必须与输入完全一致——除此之外不得有任何其他改动
    - 幂等：同一 body 处理两遍结果一致
+   - **没插过零宽空格时必须返回 `undefined`**（不是 `body`）：返回对象会让 magpie 重新序列化整包 JSON，83KB 请求体上约 0.13ms，比钩子本身贵 3 倍
 5. 中间件文件每秒热加载，但**改完源码要在 magpie 里 off→on 一次**确保宿主重载：
    ```sh
    magpie plugin off /Users/dpdu/Desktop/opt/magpie-antigravity-cloak
@@ -27,6 +28,27 @@
    ```
 
 ## 本仓库版本的关键设计（与社区版的差异）
+
+### 运行时事实（看 magpie 源码得出，别凭印象改）
+
+- 中间件跑在网关进程的 **moejs**（`github.com/MoeForge/moejs`）里，不在 Bun 里
+- 每个中间件编译一次，请求从 `sync.Pool` 取运行时（`internal/middleware/middleware.go`）；
+  `put()` 只 `ReleaseCallData()`，不重新 `Load`，所以**模块顶层状态在同一池实例里跨请求保留**
+  → `COMPILED` 正则缓存有效，每个池实例各一份
+- 没有定时器 / `fetch` / Node API；只能相对路径 import；`console.log` 每分钟 60 行
+- `onProvider` 返回 `undefined` → magpie 保留原始字节；返回对象 → 重新序列化写回（大 body 的主要开销）
+
+### magpie 内置已做的事（别重复造）
+
+`internal/gateway/codeassist.go` 的 `antigravityCloak` 在路由**之后**打断 5 行，
+默认开（`prompt=default`，`prompt=as-written` 关）：billing header、
+`built on anthropic's claude agent sdk`、Codex 两条 GPT-5 身份行、Hermes 旧人设。
+规则与本仓库相同（每段 3+ 字母数字两处零宽），**但只看 system instruction**，
+且认不出已打断的行（源码注释："A line already broken up (the antigravity-cloak
+plugin's) isn't one any more and is left alone."）。
+本仓库的增量 = omp 整句 + 更宽的词 + messages/input 位置 + deep。
+
+### 本仓库的设计
 
 - 入口 `onProvider(body, ctx)`，按 `ctx.provider.account` 白名单生效，
   默认 `accounts: ["antigravity"]`；其他供应商（Claude 官方订阅、Grok、DeepSeek、

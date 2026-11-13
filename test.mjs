@@ -5,9 +5,11 @@
 // 每个混淆断言都成对检查“混淆前不含 ZW、混淆后与 breakWord 一致”。
 import { onProvider } from "./antigravity-cloak.middleware.js"
 
-// 默认按“请求正在发给 antigravity 账号”调用，个别用例再覆盖 account / options
+// 默认按“请求正在发给 antigravity 账号”调用，个别用例再覆盖 account / options。
+// onProvider 没插过零宽空格时返回 undefined（让 magpie 保留原始字节），
+// 这里退回 body 本身，方便断言“没被动过”。
 const onRequest = (body, ctx = {}) =>
-  onProvider(body, { protocol: "anthropic", provider: { id: "antigravity", account: "antigravity" }, ...ctx })
+  onProvider(body, { protocol: "anthropic", provider: { id: "antigravity", account: "antigravity" }, ...ctx }) ?? body
 
 const ZW = "\u200B"
 // 纯净词构造：把源码里的词拆开拼接，保证测试文件里永远没有完整触发词
@@ -291,7 +293,10 @@ const untouched = (after, w) =>
 // 16. 作用域：只对 antigravity 账号生效，其他账号/密钥供应商一律不动
 {
   const sys = `You are ${W.cc}, ${W.billing}: v=1;`
-  const mk = (ctx) => onProvider({ system: sys, messages: [] }, { protocol: "anthropic", options: {}, ...ctx })
+  const mk = (ctx) => {
+    const body = { system: sys, messages: [] }
+    return onProvider(body, { protocol: "anthropic", options: {}, ...ctx }) ?? body
+  }
   const others = [
     ["claude 官方订阅", { provider: { id: "claude", account: "claude" } }],
     ["grok 订阅", { provider: { id: "grok", account: "grok" } }],
@@ -307,13 +312,16 @@ const untouched = (after, w) =>
 {
   const sys = `You are ${W.cc}.`
   const opts = { accounts: ["claude"] }
-  const atAntigravity = onProvider({ system: sys, messages: [] }, { protocol: "anthropic", provider: { account: "antigravity" }, options: opts })
-  const atClaude = onProvider({ system: sys, messages: [] }, { protocol: "anthropic", provider: { account: "claude" }, options: opts })
-  assert(atAntigravity.system === sys, "accounts=[claude]：antigravity 不动")
-  cloaked(sys, atClaude.system, W.cc)
+  const run = (account) => {
+    const body = { system: sys, messages: [] }
+    return onProvider(body, { protocol: "anthropic", provider: { account }, options: opts }) ?? body
+  }
+  assert(run("antigravity").system === sys, "accounts=[claude]：antigravity 不动")
+  cloaked(sys, run("claude").system, W.cc)
   // accounts 为空数组时回退到默认的 antigravity
-  const empty = { accounts: [] }
-  cloaked(sys, onProvider({ system: sys, messages: [] }, { protocol: "anthropic", provider: { account: "antigravity" }, options: empty }).system, W.cc)
+  const body = { system: sys, messages: [] }
+  const empty = onProvider(body, { protocol: "anthropic", provider: { account: "antigravity" }, options: { accounts: [] } }) ?? body
+  cloaked(sys, empty.system, W.cc)
 }
 
 // 18. responses 协议：instructions 与 input 里的 system/developer 消息
@@ -328,7 +336,7 @@ const untouched = (after, w) =>
       { role: "user", content: user },
     ],
   }
-  const out = onProvider(body, { protocol: "responses", provider: { account: "antigravity" }, options: {} })
+  const out = onProvider(body, { protocol: "responses", provider: { account: "antigravity" }, options: {} }) ?? body
   cloaked(ins, out.instructions, W.cc)
   cloaked(dev, out.input[0].content, W.sdk)
   untouched(out.input[1].content, W.cc)
@@ -338,7 +346,7 @@ const untouched = (after, w) =>
 {
   const t = `Follow ${W.rfc}.`
   const body = { system_instruction: { parts: [{ text: t }] }, contents: [] }
-  const out = onProvider(body, { protocol: "gemini", provider: { account: "antigravity" }, options: {} })
+  const out = onProvider(body, { protocol: "gemini", provider: { account: "antigravity" }, options: {} }) ?? body
   cloaked(t, out.system_instruction.parts[0].text, W.rfc)
 }
 
@@ -360,6 +368,68 @@ const untouched = (after, w) =>
   cloaked(sys, out.system, W.codex2)
   cloaked(sys, out.system, W.hermes)
   cloaked(sys, out.system, W.rfcLine)
+}
+
+// 22. 返回 undefined 的语义：没插过零宽空格就不返回对象，让 magpie 保留原始字节
+{
+  const clean = { system: "nothing to see", messages: [{ role: "user", content: "hi" }] }
+  assert(onProvider(clean, { protocol: "anthropic", provider: { account: "antigravity" }, options: {} }) === undefined, "无命中：返回 undefined（省掉 JSON 回写）")
+  assert(onProvider({ system: W.cc, messages: [] }, { protocol: "anthropic", provider: { account: "claude" }, options: {} }) === undefined, "非 antigravity：返回 undefined")
+  assert(onProvider({ system: W.cc, messages: [] }, { protocol: "anthropic", provider: { account: "antigravity" }, options: { off: true } }) === undefined, "off：返回 undefined")
+  const hit = { system: W.cc, messages: [] }
+  assert(onProvider(hit, { protocol: "anthropic", provider: { account: "antigravity" }, options: {} }) === hit, "有命中：返回 body 本身")
+  // deep 模式同样遵守
+  assert(onProvider({ system: "clean", messages: [{ role: "user", content: "clean" }] }, { protocol: "anthropic", provider: { account: "antigravity" }, options: { deep: true } }) === undefined, "deep 无命中：返回 undefined")
+}
+
+// 23. 合并成一遍扫描：与旧逻辑（逐词依次替换）在默认词表下逐字一致；
+//     任意重叠的自定义词只要求“只插零宽、不其他改动”这条不变量。
+{
+  const DEFAULT_WORDS = [W.billing, W.sdk, W.cc, W.cli, W.conv, "s" + "ystem_conventions", "s" + "ystem-directive", "s" + "ystem_directive", W.rfc, W.codex, W.codex2, W.hermes, W.rfcLine]
+  // 旧逻辑：逐词各跑一遍（按长度从长到短）
+  const sequential = (text, words) => {
+    let out = text
+    for (const w of [...words].sort((a, b) => b.length - a.length)) {
+      const re = new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi")
+      out = out.replace(re, breakWord)
+    }
+    return out
+  }
+  const texts = [
+    `You are ${W.cc}, built on ${W.sdk}.`,
+    `${W.billing}: cc_version=2.1.0;`,
+    `${W.codex} / ${W.codex2} / ${W.hermes}`,
+    `${W.rfcLine}`,
+    `Follow <${W.conv}> and ${W.rfc}.`,
+    `mix ${W.cc.toUpperCase()} and ${W.billing} and ${W.rfcLine}`,
+    "no words here",
+    "",
+  ]
+  let same = true
+  for (const text of texts) {
+    const got = onRequest({ system: text, messages: [] }).system
+    const want = sequential(text, DEFAULT_WORDS)
+    if (got !== want) {
+      same = false
+      console.error(`  ‼ 默认词表下与逐词不一致 text=${JSON.stringify(text)}\n     got=${JSON.stringify(got)}\n    want=${JSON.stringify(want)}`)
+    }
+  }
+  assert(same, "合并扫描：默认词表下与旧逐词逻辑逐字一致")
+
+  // 重叠/正则元字符的自定义词：不要求与逐词完全相同，但必须只插零宽、去掉即还原
+  const wordSets = [["aa", "aaaa", "aaa"], ["ab", "bcd", "abcde"], ["(a|b) [c]", "a|b", "[c]"], ["my-marker", "marker", "my"], ["RFC 2119", "RFC 2119 keywords: MUST, REQUIRED"]]
+  const overlapped = ["aaaa aaaaaa aa", "abcde ab bcd xabcdx", "(a|b) [c] a|b [c]", "my-marker marker my my-marker", "RFC 2119 keywords: MUST, REQUIRED and RFC 2119"]
+  let onlyZw = true
+  for (const words of wordSets) {
+    for (const text of overlapped) {
+      const out = onRequest({ system: text, messages: [] }, { options: { extraWords: words } }).system
+      if (out.replaceAll(ZW, "") !== text) {
+        onlyZw = false
+        console.error(`  ‼ 重叠词引入了零宽以外的改动 words=${JSON.stringify(words)} text=${JSON.stringify(text)} out=${JSON.stringify(out)}`)
+      }
+    }
+  }
+  assert(onlyZw, "合并扫描：重叠/元字符自定义词仍只插零宽，去掉即还原")
 }
 
 console.log(process.exitCode ? "有失败" : "全部通过")

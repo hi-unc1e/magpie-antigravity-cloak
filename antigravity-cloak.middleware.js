@@ -89,17 +89,20 @@ function escapeRegExp(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
-// 同一套词表只编译一次：预筛正则（无 g，可安全复用 test）+
-// 逐词替换正则（带 g，String.replace 每次调用都会重置 lastIndex，可安全复用）
+// 同一套词表只编译一次：预筛正则（无 g，可安全复用 test）+ 单个合并替换正则。
+// 合并成一条 alternation 比逐词各跑一遍省 N-1 次全量扫描；词表按长度从长到短
+// 排列，同一起点上先试最长的词，与逐词依次替换的结果一致（见 test.mjs 的等价用例）。
+// 带 g 的正则配 String.replace 每次调用都会重置 lastIndex，可安全复用。
 function compileCloak(extra) {
   const words = normalizeWords(extra)
   const key = words.join("\u0000")
   const hit = COMPILED.get(key)
   if (hit) return hit
 
+  const alternation = words.map(escapeRegExp).join("|")
   const cloak = {
-    gate: words.length ? new RegExp(words.map(escapeRegExp).join("|"), "i") : null,
-    passes: words.map((w) => new RegExp(escapeRegExp(w), "gi")),
+    gate: words.length ? new RegExp(alternation, "i") : null,
+    one: words.length ? new RegExp(alternation, "gi") : null,
   }
   if (COMPILED.size >= MAX_CACHE) COMPILED.clear()
   COMPILED.set(key, cloak)
@@ -121,30 +124,32 @@ function cloakMatch(m) {
   return m[0] + ZERO_WIDTH + m.slice(1)
 }
 
-// 在 text 的每个敏感词上做 cloakMatch。
-// 每个词用正则整体替换一遍：已混淆的词中间多了零宽空格，
-// 不再匹配，天然幂等。
+// 在 text 的每个敏感词上做 cloakMatch，一遍扫完。
+// 已混淆的词中间多了零宽空格，不再匹配，天然幂等。
+// 没有命中时原样返回同一个字符串，调用方靠引用比较就知道有没有改动。
 function cloakText(text, cloak) {
   if (typeof text !== "string" || text.length < 2) return text
-  // 预筛：一条文本都不含敏感词时，省掉 N 遍 replace
+  // 预筛：一条文本都不含敏感词时，连 replace 都不做
   if (!cloak.gate || !cloak.gate.test(text)) return text
-  let out = text
-  for (const re of cloak.passes) out = out.replace(re, cloakMatch)
-  return out
+  return text.replace(cloak.one, cloakMatch)
 }
 
 // 递归遍历 JSON 值：对每个字符串混淆，并原地写回。
 // 疑似 base64 / data URL 的超长无空格串不碰；签名等字段不碰。
-function cloakDeep(value, cloak) {
+// st.changed 记录是否真的插过零宽空格：没改过就让 onProvider 返回 undefined，
+// magpie 保留原始字节，省掉整包 JSON 的回写（大 body 上这是主要开销）。
+function cloakDeep(value, cloak, st) {
   if (value == null) return value
   const t = typeof value
   if (t === "string") {
     if (value.length > 4096 && !value.includes(" ")) return value
-    return cloakText(value, cloak)
+    const out = cloakText(value, cloak)
+    if (out !== value) st.changed = true
+    return out
   }
   if (t !== "object") return value
   if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) value[i] = cloakDeep(value[i], cloak)
+    for (let i = 0; i < value.length; i++) value[i] = cloakDeep(value[i], cloak, st)
     return value
   }
   // 只遍历自有可枚举属性，不碰原型链
@@ -152,7 +157,7 @@ function cloakDeep(value, cloak) {
   for (let i = 0; i < keys.length; i++) {
     const k = keys[i]
     if (SKIP_KEYS.has(k)) continue
-    value[k] = cloakDeep(value[k], cloak)
+    value[k] = cloakDeep(value[k], cloak, st)
   }
   return value
 }
@@ -164,9 +169,13 @@ function isSystemMessage(msg) {
 }
 
 // 混淆一个可能是字符串或嵌套对象的系统提示词字段
-function cloakSystemField(sys, cloak) {
-  if (typeof sys === "string") return cloakText(sys, cloak)
-  if (sys && typeof sys === "object") cloakDeep(sys, cloak)
+function cloakSystemField(sys, cloak, st) {
+  if (typeof sys === "string") {
+    const out = cloakText(sys, cloak)
+    if (out !== sys) st.changed = true
+    return out
+  }
+  if (sys && typeof sys === "object") cloakDeep(sys, cloak, st)
   return sys
 }
 
@@ -185,20 +194,27 @@ function accountMatches(ctx, opts) {
   return typeof account === "string" && list.includes(account)
 }
 
+// 返回值语义（magpie 文档）：返回请求体就替换掉这次要发的；
+// 不返回（undefined）就按原样发。所以没插过零宽空格时一定返回 undefined——
+// 返回对象会让 magpie 把整包 JSON 重新序列化一遍（大 body 上比本钩子本身贵好几倍）。
 export function onProvider(body, ctx) {
   const opts = ctx.options ?? {}
-  if (opts.off) return body
-  if (!accountMatches(ctx, opts)) return body
+  if (opts.off) return undefined
+  if (!accountMatches(ctx, opts)) return undefined
 
   const cloak = compileCloak(opts.extraWords)
+  const st = { changed: false }
 
   // deep：全字段深度混淆，用户消息、tools、thinking 也一起
-  if (opts.deep) return cloakDeep(body, cloak)
+  if (opts.deep) {
+    cloakDeep(body, cloak, st)
+    return st.changed ? body : undefined
+  }
 
   // 默认：只混淆系统提示词（cli-proxy-api 的保守行为，模型输出质量影响最小）
   for (let i = 0; i < SYSTEM_KEYS.length; i++) {
     const key = SYSTEM_KEYS[i]
-    if (body[key] != null) body[key] = cloakSystemField(body[key], cloak)
+    if (body[key] != null) body[key] = cloakSystemField(body[key], cloak, st)
   }
   for (let k = 0; k < MESSAGE_KEYS.length; k++) {
     const list = body[MESSAGE_KEYS[k]]
@@ -206,8 +222,8 @@ export function onProvider(body, ctx) {
     for (let i = 0; i < list.length; i++) {
       const msg = list[i]
       if (!isSystemMessage(msg)) continue
-      msg.content = cloakSystemField(msg.content, cloak)
+      msg.content = cloakSystemField(msg.content, cloak, st)
     }
   }
-  return body
+  return st.changed ? body : undefined
 }

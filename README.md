@@ -93,7 +93,7 @@ magpie plugin options "$(pwd)" '{"extraWords": ["自定义词"], "accounts": ["a
 npm test
 ```
 
-跑 82 条断言（作用域仅限 `antigravity`、各协议 system 形态、双零宽打断、Codex/Hermes/omp 新触发词、深度模式、幂等、还原等价、base64 跳过、正则特殊字符、重叠匹配、词表缓存隔离，以及 300 组随机不变量）。
+跑 89 条断言（作用域仅限 `antigravity`、各协议 system 形态、双零宽打断、Codex/Hermes/omp 新触发词、深度模式、幂等、还原等价、base64 跳过、正则特殊字符、重叠匹配、词表缓存隔离、`undefined` 返回值语义、合并扫描与逐词逻辑等价，以及 300 组随机不变量）。
 
 端到端验证（用真实 Claude Code 打 magpie，因为手工 curl 复现不出计费头触发词）：
 
@@ -119,11 +119,42 @@ Antigravity 上游（敏感词里每段字母数字的第 1、第 2 字符后各
 
 实现要点：
 
+- **没改动就不返回对象**：`onProvider` 返回 `undefined` 时 magpie 保留**原始字节**；返回对象则要把整包 JSON 重新序列化一遍。实测 83KB 请求体上这一步约 0.13ms，而钩子本身只要 0.04ms——所以只有在真的插了零宽空格时才返回 body
+- **一遍扫完**：词表合并成一条 alternation 正则，不再逐词各跑一遍（默认词表下与逐词结果逐字一致）
 - **幂等**：已混淆的词中间多了零宽空格，不再匹配，重复处理结果一致
 - **可还原**：去掉零宽空格即还原原文
 - **保守跳过**：`signature` 等字段、超长无空格疑似 base64 的字符串不碰
 - **大小写不敏感**，按词长从长到短匹配，避免短词破坏长词
-- **低开销**：词表正则按词表编译一次并跨请求缓存；每条文本先过一次单正则预筛，不含敏感词的文本直接返回（deep 模式下 56KB 真实请求体约 0.06ms/次）
+
+### 运行时（moejs）与缓存
+
+中间件不在 Bun 里，而是跑在 magpie 网关进程内的 Go JavaScript 引擎 moejs 里（每个流式事件都要过钩子，一微秒级）。每个中间件只编译一次，请求从运行时的池子里取一个，**模块顶层状态在同一个池实例里跨请求保留**，所以词表正则缓存是有效的（池里每个实例各一份，最多 32 条）。
+
+约束：只能用相对路径导入插件目录里的文件（没有 `node_modules`），没有定时器、没有 `fetch`、没有 Node API；只有 `console.log`（每分钟最多 60 行）。
+
+## 与 magpie 内置机制的关系
+
+magpie 自己（`internal/gateway/codeassist.go`，v0.1.1641 起）在路由**之后**、发往 Antigravity 之前，会把下面 5 行打断，默认开启，`magpie provider set antigravity prompt=as-written` 可关：
+
+1. `x-anthropic-billing-header:`
+2. `built on anthropic's claude agent sdk`
+3. `You are Codex, an agent based on GPT-5`
+4. `You are Codex, a coding agent based on GPT-5`
+5. `Hermes Agent, an intelligent AI assistant created by Nous Research`
+
+规则与本中间件相同（每段 3 个以上字母或数字的第 1、第 2 字符后各一个零宽），而且**只看 system instruction**，不看 messages；已经打断过的行它认不出来，会原样放过（源码注释原话：*“A line already broken up (the antigravity-cloak plugin's) isn't one any more and is left alone.”*）。
+
+所以本中间件补的是内置没做的部分：
+
+| 本中间件额外做的 | 内置做不做 |
+|---|---|
+| omp 首行 `RFC 2119 keywords: ...` | 不做 |
+| `Claude Code`、`Anthropic's official CLI`、`system-conventions` 等更宽的词 | 不做（内置用更精确的整行） |
+| chat 的 `messages` / responses 的 `input` 里的 system、developer 消息 | 不做（只看 system instruction） |
+| `deep` 模式（用户消息、tools、thinking 一起） | 不做 |
+| 先于内置生效，把活儿接下来 | 已打断的行它就不动 |
+
+把 magpie 设成 `prompt=as-written` 后，内置不再打断，就只剩本中间件。内置还会识别这类 429 并给出提示（“whatever quota is left, so it is not a quota”）。
 
 ## 文件结构
 
