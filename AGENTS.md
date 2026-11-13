@@ -48,9 +48,14 @@
   （<https://github.com/magpie-community/plugins/tree/main/packages/antigravity-cloak>）
 - 维护者：yetone（magpie 作者）。registry.json 条目名
   `@magpie-community/middleware-antigravity-cloak`，kind: middleware
-- 快照（2026-11-11 核对，版本 0.1.4，目录最后 commit
-  `9e07c7062795` 2026-11-11 "omp's first line, RFC 2119 keywords, is broken up"）：
-  - 上一版 0.1.3 是 `d5f4214effae` 2026-11-10：只在首字符后插一个零宽空格已再次 429，
+- 快照（2026-11-13 核对，版本 0.1.5，目录最后 commit
+  `2b7da486ac5c` 2026-11-12 "say what a 429 with quota left means, and how to find the words"）：
+  - 0.1.5 **只改 README 与版本号**，中间件源码与 `cases.json` 与 0.1.4 逐字节相同
+    （源码 4217 字节，sha256 `67fcec64…`；cases 10025 字节，sha256 `da8d9e17…`）
+  - 新增文档：「429 又回来了怎么办」——剩余额度下仍 429 时的二分定位法与 `extraWords` 用法
+  - 回放验证：社区版 16 个 cases 喂给本仓库中间件，**16 个逐字节一致**
+  - 上一版 0.1.4 是 `9e07c7062795` 2026-11-11：补 omp 首行 `RFC 2119 keywords: ...`
+  - 0.1.3 是 `d5f4214effae` 2026-11-10：只在首字符后插一个零宽空格已再次 429，
     改为每个连续 3 字母/数字的第 1、第 2 字符后各插一个（`/[A-Za-z0-9]{3,}/`）
   - 词表 6 个：
     1. `x-anthropic-billing-header`
@@ -66,7 +71,12 @@
   - 入口同为 `onProvider`，`accounts` 默认 `["antigravity"]`，按协议分支处理
     system 位置；`changed ? body : undefined`（无改动时返回 undefined 保留原请求）
   - 源码明文致谢本仓库上游：`After hexiaolv's magpie-antigravity-cloak (MIT)`
-  - hexiaolv 上游仓库截至 2026-11-11 仍停在 2026-10-09，没有这次双零宽和新触发词
+  - hexiaolv 上游仓库截至 2026-11-13 仍停在 2026-10-09，没有双零宽和新触发词
+- **别和社区版 `antigravity` 供应商插件搞混**（`packages/antigravity`，2026-11-13 已是 0.1.8）：
+  那是「登录 Antigravity 并发请求」的供应商插件，不是本中间件。它近期修了版本探测超时、
+  gemini-4 的 400 重试、sessionId 生成，以及对 DeepSeek Harness 某段提示词的改写。
+  最后一项会**改写原文**（不是只插零宽），与本仓库「只插零宽、去掉即还原」的不变量冲突，
+  不要照搬到本仓库。
 - 对照更新方法：
   ```sh
   # 看社区版目录有没有新 commit
@@ -76,9 +86,10 @@
   curl -s "https://raw.githubusercontent.com/magpie-community/plugins/main/packages/antigravity-cloak/cases.json"
   ```
   重点关注：新触发词、打断方式（几处零宽、插在哪）、onProvider 语义、新协议字段。
-  cases.json 的 `expect_request` 可直接当测试素材。
+  cases.json 的 `expect_request` 可直接当测试素材（无 `expect_request` 的条目表示应原样通过）。
   社区版发现的新触发词移植进 `DEFAULT_WORDS` 时要同步补测试并跑 `npm test`。
   Codex / Hermes / omp 整句和双零宽打断已在 2026-11-11 对齐进本仓库。
+  快速回放（社区版全部用例跑本仓库中间件）：
 
 ## 提交与验证
 

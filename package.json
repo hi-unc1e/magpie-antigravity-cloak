@@ -1,11 +1,12 @@
 {
   "name": "magpie-antigravity-cloak",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Antigravity 429 修复中间件：混淆请求里的计费头标记与 Claude Code / Agent SDK 指纹",
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "test": "node test.mjs"
+    "test": "node test.mjs",
+    "replay": "node scripts/replay-community-cases.mjs"
   },
   "keywords": ["magpie", "middleware", "antigravity"],
   "magpie": {
