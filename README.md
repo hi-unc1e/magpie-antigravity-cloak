@@ -1,9 +1,23 @@
 # magpie-antigravity-cloak
 
-解决 Antigravity 渠道恒定 429 的 [magpie](https://usemagpie.ai) 网关中间件。
+解决 Antigravity 渠道恒定 429 的 [magpie](https://usemagpie.ai) **网关中间件**（middleware）。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A520-green)](https://nodejs.org)
+
+## 它是什么，不是什么
+
+一句话：**agent 的请求路过 magpie 网关时，它只在“这次要发给 Antigravity 账号”的那一刻，把系统提示词里几个会被上游拦掉的词打断；别的一概不碰。**
+
+| | 说明 |
+|---|---|
+| 它**是** | magpie 的网关中间件，一个 `*.middleware.js` 单文件 + `package.json`，导出 `onProvider(body, ctx)` |
+| 它**不是** | 供应商插件。它不登录、不存 token、不发请求、不管额度，也不会让 magpie 多出一个叫 antigravity 的供应商 |
+| 它**依赖** | magpie 里已经有一个 antigravity 账号（`magpie provider antigravity` 能列出账号），否则它永远不会被调用 |
+| 它**只改** | `ctx.provider.account === "antigravity"` 的请求。Claude 官方订阅、Grok、DeepSeek、API 密钥供应商收到的提示词一个字节都不变 |
+| 它**改什么** | 只插零宽空格（U+200B），不增删改任何其他字符；去掉零宽空格就完全还原原文 |
+
+运行位置也值得说清楚：它**不在** Bun 插件宿主里，而是跑在 magpie 网关进程自己的 Go JavaScript 引擎 **moejs** 里（每个流式事件都要过钩子，微秒级）。所以没有定时器、没有 `fetch`、没有 Node API。细节见[运行时](#运行时moejs与缓存)。
 
 ## 问题现象
 
@@ -47,28 +61,35 @@ Antigravity 上游**按请求文本里的特定指纹字符串拦截**，并统�
 
 ## 安装
 
-两种方式任选其一：
+两种方式任选其一。
 
-### 方式一：magpie 插件页面直接装（推荐）
-
-打开 magpie 的 **插件** 页 → 切到 **发现** 标签 → 拉到最底部 **「已有想装的？」** 输入框，填入仓库地址后点 **安装**：
-
-```
-https://github.com/hexiaolv/magpie-antigravity-cloak
-```
-
-### 方式二：clone 到本地再装
+### 方式一：clone 到本地再装（推荐，也是本仓库的维护方式）
 
 ```sh
-git clone https://github.com/hexiaolv/magpie-antigravity-cloak.git
+# 换成你自己的 fork 或本仓库
+git clone https://github.com/hi-unc1e/magpie-antigravity-cloak.git
 cd magpie-antigravity-cloak
 npm test   # 可选：先跑一遍单测确认环境正常
 magpie plugin add "$(pwd)"
 ```
 
-本地安装的好处：插件文件每秒热加载，改 `antigravity-cloak.middleware.js` 立即生效，方便自定义词表或调试。
+本地安装的好处：magpie 每秒检查插件文件，改 `antigravity-cloak.middleware.js` 立即生效，方便自定义词表或调试。
 
 > 注意：magpie 不识别插件短名，`options` 等操作都要用完整路径。
+
+### 方式二：从 magpie 插件页装
+
+打开 magpie 的 **插件** 页 → 切到 **发现** 标签 → 拉到最底部 **「已有想装的？」** 输入框，填入仓库地址后点 **安装**。
+
+### 别装错：社区版是另一个包
+
+`@magpie-community/middleware-antigravity-cloak`（`magpie-community/plugins` 仓库，yetone 维护）是同一思路的**另一个实现**，不是本仓库的上游，会每小时自动更新。
+
+```sh
+magpie plugin add antigravity-cloak   # ← 装的是社区版，不是本仓库
+```
+
+两者差异见 [AGENTS.md](AGENTS.md) 的对照章节。本仓库是 `hexiaolv/magpie-antigravity-cloak` 的 fork，但词表、作用域、性能优化都已自己演进。
 
 ## 配置（可选）
 
@@ -160,9 +181,11 @@ magpie 自己（`internal/gateway/codeassist.go`，v0.1.1641 起）在路由**�
 
 ```
 magpie-antigravity-cloak/
-├── antigravity-cloak.middleware.js   # 中间件主体（onProvider 入口）
-├── test.mjs                          # 本地单测
-├── package.json                      # magpie 插件清单
+├── antigravity-cloak.middleware.js      # 中间件主体（onProvider 入口）
+├── test.mjs                             # 本地单测（89 条断言）
+├── scripts/replay-community-cases.mjs   # 拿社区版 cases.json 回放本仓库中间件
+├── package.json                         # magpie 插件清单
+├── AGENTS.md                            # 维护者/agent 必读：事实库、规则、对照版本
 ├── LICENSE
 └── README.md
 ```
@@ -190,6 +213,26 @@ magpie-antigravity-cloak/
 
 本中间件只打断你给它的那些词和句子，不会隐藏任意提示词——遇到新的指纹，得把新词补进词表（`extraWords` 或 `DEFAULT_WORDS`）。
 
+## 文档里的结论从哪来
+
+本文和 [AGENTS.md](AGENTS.md) 里关于 magpie 行为的描述，都不是猜的，出处是 magpie 源码：
+
+| 结论 | 出处 |
+|---|---|
+| 返回 `undefined` 保留原始字节，返回对象要重新序列化 | `internal/middleware/run.go` 的 `Run.Tried`（`case out != nil: body = out`）与 `apply` 注释 |
+| 中间件编译一次、请求从池里取运行时、模块顶层状态跨请求保留 | `internal/middleware/middleware.go` 的 `sync.Pool`、`newInst`、`get`/`put` |
+| 跑在 moejs 里、只能用相对路径 import、无定时器/fetch/Node API | magpie 文档「插件开发 → 网关中间件 → 运行方式 / 能用什么」 |
+| 内置已打断哪 5 行、只看 system instruction、认不出已打断的行 | `internal/gateway/codeassist.go` 的 `agTurnedAway`、`antigravityCloak`、`codeAssistBody` |
+| `prompt=as-written` 可关内置打断 | `magpie provider` 帮助文本 |
+
+改代码前想确认某条 magpie 行为，**去看源码或本地二进制，不要凭印象**：
+
+```sh
+magpie --version
+strings -a /Applications/magpie.app/Contents/MacOS/magpie | grep -i "<关键字>"
+curl -s https://raw.githubusercontent.com/yetone/magpie/main/internal/middleware/run.go
+```
+
 ## 注意
 
 维护者提醒：改写这些字样绕过上游拦截，理论上存在账号被 Google 风控的风险，请自行权衡。
@@ -198,6 +241,8 @@ magpie-antigravity-cloak/
 
 - [yetone/magpie](https://github.com/yetone/magpie) — issue [#666](https://github.com/yetone/magpie/issues/666) 的根因分析
 - [router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) — [PR #6280](https://github.com/router-for-me/CLIProxyAPI/pull/6280) 的零宽空格混淆思路
+- [hexiaolv/magpie-antigravity-cloak](https://github.com/hexiaolv/magpie-antigravity-cloak) — 本仓库的上游
+- [magpie-community/plugins](https://github.com/magpie-community/plugins/tree/main/packages/antigravity-cloak) — 同思路的社区实现，双零宽打断与新触发词的主要来源
 
 ## License
 
