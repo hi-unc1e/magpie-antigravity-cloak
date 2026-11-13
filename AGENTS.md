@@ -150,6 +150,44 @@ curl -s https://raw.githubusercontent.com/yetone/magpie/main/internal/gateway/co
 6. **只按首字符插一个零宽空格——已失效。**
    2026-11-11 起 Google 再次拦截该形态，必须每段 3+ 字母数字插两处。
 
+## 环境排查：antigravity 返回 400
+
+**症状**：`magpie provider test antigravity` 或实际请求返回
+`Antigravity: User location is not supported for the API use.`（magpie 的识别正则：
+`(?i)\buser location is not supported for the api use\b`，见 `internal/gateway/codeassist.go` 一带）。
+
+**结论（2026-11-13 实测）**：与本中间件无关，是**出口 IP 的问题**。
+
+| 出口 | IP | 归属 | 结果 |
+|---|---|---|---|
+| 供应商代理 `http://127.0.0.1:7890` | 195.245.219.27 | 新加坡 / AS8888 xTom（机房） | ✗ 400 地区不支持 |
+| 直连 | 104.224.156.219 | 洛杉矶 / AS25820 IT7（机房） | ✓ 正常 |
+
+本机当时的状态：供应商 `antigravity` 的 proxy 设为 `http://127.0.0.1:7890`，出口是新加坡机房 IP；
+改成 `direct` 后同一账号、同一模型（`gemini-4-argon` / `gemini-3.8-flash` / `gemini-4-carbon`）全部 200。
+2026-11-11 起该 400 开始零星出现，11-12 起成片出现（不同模型都中），与本仓库改动无关。
+
+**排查步骤**：
+
+```sh
+magpie provider test antigravity <model>       # 复现
+magpie provider antigravity                    # 看账号、模型
+python3 -c "import json;d=json.load(open('$HOME/.config/magpie/providers.json'));print([p for p in d['providers'] if p['id']=='antigravity'][0].get('proxy'))"
+curl -s https://ipinfo.io/$(curl -s https://api.ipify.org)/json      # 直连出口
+curl -s -x http://127.0.0.1:7890 https://ipinfo.io/$(curl -s -x http://127.0.0.1:7890 https://api.ipify.org)/json   # 代理出口
+```
+
+**两条修法**：
+1. 供应商 proxy 改 `direct`（2026-11-13 已改；但 magpie App 可能在保存设置时覆盖 `providers.json`，
+   建议在 App 里「设置 → 供应商 → Antigravity → 代理」也确认一次）
+2. 换一个 Google 服务得上的代理节点（换 Clash 的出口 IP），provider proxy 继续用 `127.0.0.1:7890`
+
+改 `providers.json` 前先备份：
+`cp ~/.config/magpie/providers.json /tmp/providers.json.bak`
+
+**注意**：antigravity 的 429（指纹拦截）和这个 400（地区限制）是两回事，
+别把后者归到本中间件头上。本中间件只插零宽空格，产生不了地区错误。
+
 ## 提交与验证
 
 - 提交信息用中文，说明动机与验证方式（参考 `git log`）
